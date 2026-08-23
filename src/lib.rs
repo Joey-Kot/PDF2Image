@@ -4,10 +4,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, ValueEnum};
-use hayro::hayro_interpret::InterpreterSettings;
+use hayro::hayro_interpret::font::Glyph;
+use hayro::hayro_interpret::hayro_cmap::BfString;
+use hayro::hayro_interpret::{
+    BlendMode, ClipPath, Context as InterpreterContext, Device, GlyphDrawMode, Image,
+    InterpreterCache, InterpreterSettings, Paint, PathDrawMode, SoftMask, interpret_page,
+};
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::Pixmap;
 use hayro::vello_cpu::color::palette::css::WHITE;
+use hayro::vello_cpu::kurbo::{Affine, BezPath, Point, Rect, Vec2};
 use hayro::{RenderCache, RenderSettings, render};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
@@ -18,6 +24,8 @@ const DEFAULT_QUALITY: f32 = 0.85;
 const MIN_PADDING_WIDTH: usize = 3;
 const MAX_RENDER_DIMENSION: u32 = u16::MAX as u32;
 const MAX_WEBP_DIMENSION: u16 = 16_383;
+const FONT_UNITS_PER_EM: f64 = 1_000.0;
+const TEXT_LINE_BREAK_HEIGHT_RATIO: f64 = 0.5;
 
 /// Convert PDF pages into images.
 #[derive(Debug, Parser)]
@@ -26,7 +34,7 @@ const MAX_WEBP_DIMENSION: u16 = 16_383;
     version,
     about = "将 PDF 页面转换为 WebP、PNG 或 JPG 图像",
     long_about = None,
-    after_help = "用法示例：\n  pdf2image --file document.pdf --ratio '2048:1024'\n  pdf2image --file document.pdf --ratio '2048*2048' --page '1,3,5' --format png\n  pdf2image --file document.pdf --ratio '2048:2048' --page '1-5' --format png\n  pdf2image --file document.pdf --ratio '1920,1080' --page '1-3,5' --format jpg --quality 0.9"
+    after_help = "用法示例：\n  pdf2image --file document.pdf --ratio '2048:1024'\n  pdf2image --file document.pdf --ratio '2048*2048' --page '1,3,5' --format png\n  pdf2image --file document.pdf --ratio '2048:2048' --page '1-5' --format png\n  pdf2image --file document.pdf --ratio '1920,1080' --page '1-3,5' --format jpg --quality 0.9\n  pdf2image --file document.pdf --ratio '2048:2048' --page '1,3,10' --text"
 )]
 struct Cli {
     /// 要转换的 PDF 文件
@@ -40,6 +48,10 @@ struct Cli {
     /// 要导出的页码，例如 '1,3,5'、'1-5' 或 '1-3,5'；默认导出全部页面
     #[arg(long, value_name = "页码", value_parser = parse_page_selection)]
     page: Option<PageSelection>,
+
+    /// 同时导出所选页面的文本层到同名 .txt 文件
+    #[arg(long)]
+    text: bool,
 
     /// 输出格式
     #[arg(
@@ -116,6 +128,10 @@ fn convert(cli: Cli) -> Result<()> {
     let selected_pages = resolve_page_selection(cli.page.as_ref(), page_count)?;
     let selected_page_count = selected_pages.len();
 
+    let extracted_text = cli
+        .text
+        .then(|| extract_selected_pages_text(&pdf, &selected_pages));
+
     let plans = selected_pages
         .iter()
         .map(|&page_number| {
@@ -170,6 +186,13 @@ fn convert(cli: Cli) -> Result<()> {
         );
     }
 
+    if let Some(extracted_text) = extracted_text {
+        let text_path = text_output_path(&cli.file, &output_dir)?;
+        fs::write(&text_path, extracted_text)
+            .with_context(|| format!("无法写入文本文件 {}", text_path.display()))?;
+        println!("文本层：{}", text_path.display());
+    }
+
     println!("转换完成：{}", output_dir.display());
     Ok(())
 }
@@ -194,6 +217,185 @@ fn output_directory(pdf_path: &Path) -> Result<PathBuf> {
         .context("无法从 PDF 文件名确定输出目录名称")?;
     let parent = pdf_path.parent().unwrap_or_else(|| Path::new("."));
     Ok(parent.join(stem))
+}
+
+fn text_output_path(pdf_path: &Path, output_dir: &Path) -> Result<PathBuf> {
+    let stem = pdf_path
+        .file_stem()
+        .context("无法从 PDF 文件名确定文本文件名称")?;
+    let mut file_name = stem.to_os_string();
+    file_name.push(".txt");
+    Ok(output_dir.join(file_name))
+}
+
+fn extract_selected_pages_text(pdf: &Pdf, selected_pages: &[usize]) -> String {
+    let cache = InterpreterCache::new();
+    let settings = InterpreterSettings::default();
+    let mut output = String::new();
+
+    for &page_number in selected_pages {
+        let page = &pdf.pages()[page_number - 1];
+        let mut context = InterpreterContext::new(
+            Affine::IDENTITY,
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            &cache,
+            page.xref(),
+            settings.clone(),
+        );
+        let mut extractor = TextExtractor::default();
+        interpret_page(page, &mut context, &mut extractor);
+
+        output.push_str(&format!("--------- Page {page_number} ---------\n\n"));
+        output.push_str(extractor.text.trim_end());
+        output.push_str("\n\n");
+    }
+
+    output
+}
+
+#[derive(Default)]
+struct TextExtractor {
+    text: String,
+    previous_glyph: Option<ExtractedGlyph>,
+}
+
+impl TextExtractor {
+    fn push_text(&mut self, text: &str, transform: Affine, draw_mode: TextDrawMode) {
+        let position = GlyphPosition::from_transform(transform);
+        if let Some(previous_glyph) = &self.previous_glyph
+            && position.is_on_new_line_from(previous_glyph.position)
+            && !self.text.ends_with('\n')
+        {
+            self.text.push('\n');
+        }
+
+        self.text.push_str(text);
+        self.previous_glyph = Some(ExtractedGlyph {
+            text: text.to_owned(),
+            transform,
+            position,
+            draw_mode,
+        });
+    }
+
+    fn skips_duplicate_stroke(&mut self, text: &str, transform: Affine) -> bool {
+        let Some(previous_glyph) = &self.previous_glyph else {
+            return false;
+        };
+
+        if previous_glyph.draw_mode != TextDrawMode::Fill
+            || previous_glyph.text != text
+            || previous_glyph.transform != transform
+        {
+            return false;
+        }
+
+        self.previous_glyph = Some(ExtractedGlyph {
+            text: text.to_owned(),
+            transform,
+            position: previous_glyph.position,
+            draw_mode: TextDrawMode::Stroke,
+        });
+        true
+    }
+}
+
+struct ExtractedGlyph {
+    text: String,
+    transform: Affine,
+    position: GlyphPosition,
+    draw_mode: TextDrawMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextDrawMode {
+    Fill,
+    Stroke,
+    Invisible,
+}
+
+impl TextDrawMode {
+    fn from_glyph_draw_mode(draw_mode: &GlyphDrawMode) -> Self {
+        match draw_mode {
+            GlyphDrawMode::Fill => Self::Fill,
+            GlyphDrawMode::Stroke(_) => Self::Stroke,
+            GlyphDrawMode::Invisible => Self::Invisible,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GlyphPosition {
+    origin: Point,
+    baseline: Vec2,
+    line_height: f64,
+}
+
+impl GlyphPosition {
+    fn from_transform(transform: Affine) -> Self {
+        let [a, b, c, d, e, f] = transform.as_coeffs();
+        Self {
+            origin: Point::new(e, f),
+            baseline: Vec2::new(a, b),
+            line_height: Vec2::new(c, d).hypot() * FONT_UNITS_PER_EM,
+        }
+    }
+
+    fn is_on_new_line_from(self, previous: Self) -> bool {
+        let baseline_length = previous.baseline.hypot();
+        let line_break_distance = previous.line_height * TEXT_LINE_BREAK_HEIGHT_RATIO;
+        if !baseline_length.is_finite()
+            || baseline_length == 0.0
+            || !line_break_distance.is_finite()
+            || line_break_distance <= 0.0
+        {
+            return false;
+        }
+
+        let displacement = self.origin - previous.origin;
+        let distance_from_baseline = displacement.cross(previous.baseline).abs() / baseline_length;
+        distance_from_baseline > line_break_distance
+    }
+}
+
+impl Device<'_> for TextExtractor {
+    fn set_soft_mask(&mut self, _: Option<SoftMask<'_>>) {}
+
+    fn set_blend_mode(&mut self, _: BlendMode) {}
+
+    fn draw_path(&mut self, _: &BezPath, _: Affine, _: &Paint<'_>, _: &PathDrawMode) {}
+
+    fn push_clip_path(&mut self, _: &ClipPath) {}
+
+    fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'_>>, _: BlendMode) {}
+
+    fn draw_glyph(
+        &mut self,
+        glyph: &Glyph<'_>,
+        transform: Affine,
+        glyph_transform: Affine,
+        _: &Paint<'_>,
+        draw_mode: &GlyphDrawMode,
+    ) {
+        let text = match glyph.as_unicode() {
+            Some(BfString::Char(character)) => character.to_string(),
+            Some(BfString::String(text)) => text,
+            None => "�".to_owned(),
+        };
+        let transform = transform * glyph_transform;
+        let text_draw_mode = TextDrawMode::from_glyph_draw_mode(draw_mode);
+        if text_draw_mode == TextDrawMode::Stroke && self.skips_duplicate_stroke(&text, transform) {
+            return;
+        }
+
+        self.push_text(&text, transform, text_draw_mode);
+    }
+
+    fn draw_image(&mut self, _: Image<'_, '_>, _: Affine) {}
+
+    fn pop_clip_path(&mut self) {}
+
+    fn pop_transparency_group(&mut self) {}
 }
 
 fn prepare_output_directory(path: &Path) -> Result<()> {
@@ -493,6 +695,21 @@ mod tests {
         assert_eq!(cli.format, OutputFormat::Webp);
         assert_eq!(cli.quality, DEFAULT_QUALITY);
         assert!(cli.page.is_none());
+        assert!(!cli.text);
+    }
+
+    #[test]
+    fn command_line_enables_text_export() {
+        let cli = Cli::try_parse_from([
+            "pdf2image",
+            "--file",
+            "document.pdf",
+            "--ratio",
+            "2048:1024",
+            "--text",
+        ])
+        .unwrap();
+        assert!(cli.text);
     }
 
     #[test]
@@ -504,6 +721,7 @@ mod tests {
         assert!(help.contains("--page '1,3,5'"));
         assert!(help.contains("--page '1-5'"));
         assert!(help.contains("--page '1-3,5'"));
+        assert!(help.contains("--text"));
     }
 
     #[test]
@@ -551,6 +769,16 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_entire_input_stem_in_the_text_file_name() {
+        let path = text_output_path(
+            Path::new("/tmp/annual.report.pdf"),
+            Path::new("/tmp/annual.report"),
+        )
+        .unwrap();
+        assert_eq!(path, Path::new("/tmp/annual.report/annual.report.txt"));
+    }
+
+    #[test]
     fn rejects_non_empty_output_directory() {
         let temp = tempfile::tempdir().unwrap();
         let output = temp.path().join("document");
@@ -594,6 +822,7 @@ mod tests {
                 height: 100,
             },
             page: None,
+            text: false,
             format: OutputFormat::Webp,
             quality: DEFAULT_QUALITY,
         })
@@ -630,6 +859,7 @@ mod tests {
                 height: 100,
             },
             page: Some(parse_page_selection("1,3,5").unwrap()),
+            text: false,
             format: OutputFormat::Webp,
             quality: DEFAULT_QUALITY,
         })
@@ -642,6 +872,76 @@ mod tests {
             .collect::<Vec<_>>();
         file_names.sort();
         assert_eq!(file_names, ["001.webp", "003.webp", "005.webp"]);
+    }
+
+    #[test]
+    fn exports_text_for_only_the_selected_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let pdf_path = temp.path().join("selected.pdf");
+        fs::write(
+            &pdf_path,
+            text_pdf_with_pages(&[("Alpha", "Beta"), ("Ignored", "Text"), ("Gamma", "")]),
+        )
+        .unwrap();
+
+        convert(Cli {
+            file: pdf_path,
+            ratio: MaxSize {
+                width: 100,
+                height: 100,
+            },
+            page: Some(parse_page_selection("1,3").unwrap()),
+            text: true,
+            format: OutputFormat::Webp,
+            quality: DEFAULT_QUALITY,
+        })
+        .unwrap();
+
+        let output_dir = temp.path().join("selected");
+        let text = fs::read_to_string(output_dir.join("selected.txt")).unwrap();
+        assert_eq!(
+            text,
+            "--------- Page 1 ---------\n\nAlpha\nBeta\n\n--------- Page 3 ---------\n\nGamma\n\n"
+        );
+    }
+
+    #[test]
+    fn extracts_fill_and_stroke_text_once() {
+        let pdf = Pdf::new(text_pdf_with_page_contents(&[String::from(
+            "BT\n/F1 12 Tf\n10 80 Td\n2 Tr\n(Outlined) Tj\nET\n",
+        )]))
+        .unwrap();
+
+        assert_eq!(
+            extract_selected_pages_text(&pdf, &[1]),
+            "--------- Page 1 ---------\n\nOutlined\n\n"
+        );
+    }
+
+    #[test]
+    fn extracts_stroke_only_text() {
+        let pdf = Pdf::new(text_pdf_with_page_contents(&[String::from(
+            "BT\n/F1 12 Tf\n10 80 Td\n1 Tr\n(Outlined) Tj\nET\n",
+        )]))
+        .unwrap();
+
+        assert_eq!(
+            extract_selected_pages_text(&pdf, &[1]),
+            "--------- Page 1 ---------\n\nOutlined\n\n"
+        );
+    }
+
+    #[test]
+    fn keeps_rotated_text_on_a_single_line() {
+        let pdf = Pdf::new(text_pdf_with_page_contents(&[String::from(
+            "BT\n/F1 12 Tf\n0 1 -1 0 10 10 Tm\n(Rotate) Tj\n0 -18 Td\n(Again) Tj\nET\n",
+        )]))
+        .unwrap();
+
+        assert_eq!(
+            extract_selected_pages_text(&pdf, &[1]),
+            "--------- Page 1 ---------\n\nRotate\nAgain\n\n"
+        );
     }
 
     fn minimal_pdf(width: u32, height: u32) -> Vec<u8> {
@@ -680,6 +980,64 @@ mod tests {
             ));
         }
 
+        pdf_from_objects(objects)
+    }
+
+    fn text_pdf_with_pages(lines: &[(&str, &str)]) -> Vec<u8> {
+        assert!(!lines.is_empty());
+
+        let contents = lines
+            .iter()
+            .map(|&(first_line, second_line)| {
+                if second_line.is_empty() {
+                    format!("BT\n/F1 12 Tf\n10 80 Td\n({first_line}) Tj\nET\n")
+                } else {
+                    format!(
+                        "BT\n/F1 12 Tf\n10 80 Td\n({first_line}) Tj\n0 -18 Td\n({second_line}) Tj\nET\n"
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        text_pdf_with_page_contents(&contents)
+    }
+
+    fn text_pdf_with_page_contents(contents: &[String]) -> Vec<u8> {
+        assert!(!contents.is_empty());
+
+        let first_page_object = 3;
+        let first_content_object = first_page_object + contents.len();
+        let font_object = first_content_object + contents.len();
+        let kids = (0..contents.len())
+            .map(|index| format!("{} 0 R", first_page_object + index))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut objects = Vec::with_capacity(3 + contents.len() * 2);
+        objects.push("<< /Type /Catalog /Pages 2 0 R >>".to_owned());
+        objects.push(format!(
+            "<< /Type /Pages /Kids [{kids}] /Count {} >>",
+            contents.len()
+        ));
+
+        for index in 0..contents.len() {
+            let content_object = first_content_object + index;
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /Font << /F1 {font_object} 0 R >> >> /Contents {content_object} 0 R >>"
+            ));
+        }
+
+        for content in contents {
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{}endstream",
+                content.len(),
+                content
+            ));
+        }
+
+        objects.push("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned());
+        pdf_from_objects(objects)
+    }
+
+    fn pdf_from_objects(objects: Vec<String>) -> Vec<u8> {
         let mut pdf = String::from("%PDF-1.4\n");
         let mut offsets = Vec::new();
         for (index, object) in objects.iter().enumerate() {

@@ -18,12 +18,13 @@ A cross-platform command-line utility that converts PDF pages to WebP, PNG, or J
 ## Usage
 
 ```text
-pdf2image --file <PDF> --ratio <MAX_WIDTH:MAX_HEIGHT> [--page <PAGES>] [--format <FORMAT>] [--quality <QUALITY>]
+pdf2image --file <PDF> --ratio <MAX_WIDTH:MAX_HEIGHT> [--page <PAGES>] [--text] [--format <FORMAT>] [--quality <QUALITY>]
 ```
 
 - `--file`: Required. The input PDF file.
 - `--ratio`: Required. The maximum pixel width and height allowed for each page image. The accepted formats are `width:height`, `width*height`, and `width,height`, for example `2048:1024`. The program preserves the page's aspect ratio and scales it to fit within these bounds.
 - `--page`: Optional. The page numbers to export. Single-page lists, continuous ranges, and combinations of both are supported, for example `'1,3,5'`, `'1-5'`, or `'1-3,5'`. Page numbering starts at `1`; all pages are exported when this option is omitted.
+- `--text`: Optional. Also exports the text layer for the selected pages into a `.txt` file with the same name as the input PDF, inside the output directory. The text file uses page headings to separate each page.
 - `--format`: Optional. Supported formats are `webp`, `png`, and `jpg`. The default is `webp`; `jpeg` is accepted as an alias for `jpg`.
 - `--quality`: Optional. A value from `0.0` to `1.0`, with a default of `0.85`. This option controls the lossy encoding quality for WebP and JPG. PNG is lossless, so this option does not affect PNG image quality.
 
@@ -34,6 +35,7 @@ pdf2image --file document.pdf --ratio '2048:1024'
 pdf2image --file document.pdf --ratio '2048*2048' --page '1,3,5' --format png
 pdf2image --file document.pdf --ratio '2048:2048' --page '1-5' --format png
 pdf2image --file document.pdf --ratio '1920,1080' --page '1-3,5' --format jpg --quality 0.9
+pdf2image --file document.pdf --ratio '2048:2048' --page '1,3,10' --text
 ```
 
 Run `pdf2image --help` to view the command-line help.
@@ -46,12 +48,15 @@ For an input file at `/path/document.pdf`, the program creates `/path/document/`
 document/
 ├── 001.webp
 ├── 002.webp
-└── 003.webp
+├── 003.webp
+└── document.txt  # only when --text is specified
 ```
 
 File names are padded to at least three digits and automatically use more digits for documents with more than 999 pages. Transparent PDF backgrounds are composited onto a white background.
 
 When `--page` selects only some pages, output file names retain the original PDF page numbers. For example, `--page '1,3,5'` produces `001.webp`, `003.webp`, and `005.webp`.
+
+When `--text` is specified, the text file contains only the pages selected by `--page`, in page-number order. For example, selecting pages `1,3,10` writes sections headed `--------- Page 1 ---------`, `--------- Page 3 ---------`, and `--------- Page 10 ---------`. This extracts the PDF's existing text layer; it does not perform OCR, so scanned pages without a text layer will be empty.
 
 If an output directory with the same name already exists and is not empty, the program reports an error and stops to avoid overwriting existing files. An existing empty directory can be reused.
 
