@@ -62,10 +62,10 @@ If an output directory with the same name already exists and is not empty, the p
 
 ## Building Locally
 
-Rust `1.92` or later is required:
+Rust `1.99.1` is required. The toolchain is pinned in `rust-toolchain.toml` and used by release builds:
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 The resulting executable is located at `target/release/pdf2image`, or `target/release/pdf2image.exe` on Windows.

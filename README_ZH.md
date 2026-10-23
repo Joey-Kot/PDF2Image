@@ -62,10 +62,10 @@ document/
 
 ## 本地编译
 
-需要 Rust `1.92` 或更高版本：
+需要 Rust `1.99.1`。`rust-toolchain.toml` 已固定工具链版本，发布构建也使用该版本：
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 编译结果位于 `target/release/pdf2image`；Windows 下为 `target/release/pdf2image.exe`。

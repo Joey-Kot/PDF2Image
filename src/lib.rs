@@ -592,7 +592,7 @@ fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
 
 fn encode_jpeg(rgba: &[u8], width: u32, height: u32, quality: f32) -> Result<Vec<u8>> {
     let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         rgb.extend_from_slice(&pixel[..3]);
     }
 
@@ -792,7 +792,7 @@ mod tests {
     #[test]
     fn encodes_png_and_jpeg() {
         let mut pixmap = Pixmap::new(2, 3);
-        for pixel in pixmap.data_as_u8_slice_mut().chunks_exact_mut(4) {
+        for pixel in pixmap.data_as_u8_slice_mut().as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&[240, 128, 64, 255]);
         }
 
