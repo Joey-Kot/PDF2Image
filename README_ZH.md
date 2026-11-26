@@ -40,6 +40,22 @@ pdf2image --file document.pdf --ratio '2048:2048' --page '1,3,10' --text
 
 也可以运行 `pdf2image --help` 查看帮助。
 
+## Shell 补全
+
+将 `pdf2image` 放入 `PATH` 后，在对应 Shell 里运行命令即可为当前会话启用补全。
+
+| Shell | 启用命令 |
+| --- | --- |
+| Bash | `source <(pdf2image completion bash)` |
+| Zsh | `source <(pdf2image completion zsh)` |
+| Fish | `pdf2image completion fish \| source` |
+| PowerShell | `pdf2image completion powershell \| Out-String \| Invoke-Expression` |
+| Elvish | `eval (pdf2image completion elvish \| slurp)` |
+
+如果 Zsh 尚未初始化补全，先运行 `autoload -Uz compinit && compinit`。要在新会话中自动启用，把对应命令加到 Shell 的启动配置。
+
+补全包括输出格式、常用尺寸和画质值，以及 PDF 文件路径。
+
 ## 输出规则
 
 输入文件为 `/path/document.pdf` 时，程序会在原目录创建 `/path/document/`，并按页输出：

@@ -8,8 +8,10 @@ description = "A cross-platform CLI that renders PDF pages to WebP, PNG, or JPEG
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+clap_complete = { version = "=4.6.12", features = ["unstable-dynamic"] }
 hayro = "0.7.1"
 image = { version = "0.25.8", default-features = false, features = ["jpeg", "png"] }
+shlex = "2.0"
 webp = { version = "0.3.1", default-features = false }
 
 [dev-dependencies]

@@ -40,6 +40,22 @@ pdf2image --file document.pdf --ratio '2048:2048' --page '1,3,10' --text
 
 Run `pdf2image --help` to view the command-line help.
 
+## Shell completion
+
+With `pdf2image` on your `PATH`, run the command for your shell to enable completion in the current session.
+
+| Shell | Command |
+| --- | --- |
+| Bash | `source <(pdf2image completion bash)` |
+| Zsh | `source <(pdf2image completion zsh)` |
+| Fish | `pdf2image completion fish \| source` |
+| PowerShell | `pdf2image completion powershell \| Out-String \| Invoke-Expression` |
+| Elvish | `eval (pdf2image completion elvish \| slurp)` |
+
+If Zsh completion has yet to be initialized, run `autoload -Uz compinit && compinit` first. For future sessions, add the corresponding command to your shell startup configuration.
+
+Completion includes the output format, common sizes and quality values, and PDF paths.
+
 ## Output Rules
 
 For an input file at `/path/document.pdf`, the program creates `/path/document/` in the same directory and writes one image per page:

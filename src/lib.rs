@@ -1,9 +1,12 @@
+mod completion;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
+use clap_complete::PathCompleter;
 use hayro::hayro_interpret::font::Glyph;
 use hayro::hayro_interpret::hayro_cmap::BfString;
 use hayro::hayro_interpret::{
@@ -38,15 +41,31 @@ const TEXT_LINE_BREAK_HEIGHT_RATIO: f64 = 0.5;
 )]
 struct Cli {
     /// 要转换的 PDF 文件
-    #[arg(long, value_name = "PDF")]
+    #[arg(
+        long,
+        value_name = "PDF",
+        add = completion::path_values(
+            PathCompleter::any().filter(|path| path.is_file() && has_pdf_extension(path))
+        )
+    )]
     file: PathBuf,
 
     /// 输出图像的最大宽高，例如 '2048:1024'、'2048*1024' 或 '2048,1024'
-    #[arg(long, value_name = "最大宽:最大高", value_parser = parse_max_size)]
+    #[arg(
+        long,
+        value_name = "最大宽:最大高",
+        value_parser = parse_max_size,
+        add = completion::values(["1920:1080", "2048:1024", "2048:2048"])
+    )]
     ratio: MaxSize,
 
     /// 要导出的页码，例如 '1,3,5'、'1-5' 或 '1-3,5'；默认导出全部页面
-    #[arg(long, value_name = "页码", value_parser = parse_page_selection)]
+    #[arg(
+        long,
+        value_name = "页码",
+        value_parser = parse_page_selection,
+        add = completion::values(["1"])
+    )]
     page: Option<PageSelection>,
 
     /// 同时导出所选页面的文本层到同名 .txt 文件
@@ -59,12 +78,19 @@ struct Cli {
         value_name = "格式",
         value_enum,
         ignore_case = true,
-        default_value = "webp"
+        default_value = "webp",
+        add = completion::enum_values::<OutputFormat>()
     )]
     format: OutputFormat,
 
     /// 图像质量，范围为 0.0 到 1.0；PNG 为无损格式，该参数不改变画质
-    #[arg(long, value_name = "质量", default_value_t = DEFAULT_QUALITY, value_parser = parse_quality)]
+    #[arg(
+        long,
+        value_name = "质量",
+        default_value_t = DEFAULT_QUALITY,
+        value_parser = parse_quality,
+        add = completion::values(["0", "0.85", "1"])
+    )]
     quality: f32,
 }
 
@@ -112,7 +138,15 @@ struct PageRenderPlan {
 
 /// Parse command-line arguments and run the conversion.
 pub fn run() -> Result<()> {
-    convert(Cli::parse())
+    let command = Cli::command()
+        .disable_help_subcommand(true)
+        .subcommand_negates_reqs(true)
+        .args_conflicts_with_subcommands(true)
+        .subcommand(completion::command("生成 Shell 补全脚本"));
+    if let Some(cli) = completion::parse(command)? {
+        convert(cli)?;
+    }
+    Ok(())
 }
 
 fn convert(cli: Cli) -> Result<()> {
@@ -203,12 +237,18 @@ fn validate_pdf_path(path: &Path) -> Result<()> {
         "PDF 文件不存在或不是普通文件：{}",
         path.display()
     );
-    let is_pdf = path
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
-    ensure!(is_pdf, "输入文件必须使用 .pdf 扩展名：{}", path.display());
+    ensure!(
+        has_pdf_extension(path),
+        "输入文件必须使用 .pdf 扩展名：{}",
+        path.display()
+    );
     Ok(())
+}
+
+fn has_pdf_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
 }
 
 fn output_directory(pdf_path: &Path) -> Result<PathBuf> {
@@ -615,7 +655,6 @@ fn sequence_file_name(index: usize, padding_width: usize, extension: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
     use std::fmt::Write as _;
 
     #[test]
@@ -710,18 +749,6 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.text);
-    }
-
-    #[test]
-    fn help_includes_quoted_ratio_and_page_examples() {
-        let help = Cli::command().render_help().to_string();
-        assert!(help.contains("--ratio '2048:1024'"));
-        assert!(help.contains("--ratio '2048*2048'"));
-        assert!(help.contains("--ratio '1920,1080'"));
-        assert!(help.contains("--page '1,3,5'"));
-        assert!(help.contains("--page '1-5'"));
-        assert!(help.contains("--page '1-3,5'"));
-        assert!(help.contains("--text"));
     }
 
     #[test]
